@@ -1,0 +1,154 @@
+name: BVT Triage Action
+description: >
+  Downloads CI artifacts for a failed workflow run, runs the Python
+  triage classifier, and posts a structured failure report as a PR comment.
+
+inputs:
+  run-id:
+    description: "GitHub Actions run ID of the failing CI job"
+    required: true
+  workflow:
+    description: "Name of the failing CI workflow"
+    required: true
+  repo:
+    description: "owner/repo"
+    required: true
+  token:
+    description: "GitHub token with pull-requests:write + actions:read"
+    required: true
+  pr-number:
+    description: "PR number that triggered the CI run (empty = no PR comment)"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+
+    # ── 1. Fetch check-run annotations (fastest path — no download needed) ───
+    - name: Fetch check-run annotations
+      id: annotations
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        FAILED_JOB_IDS=$(gh api \
+          "repos/${{ inputs.repo }}/actions/runs/${{ inputs.run-id }}/jobs" \
+          --jq '[.jobs[] | select(.conclusion=="failure")] | .[].id' 2>/dev/null || true)
+
+        mkdir -p /tmp/bvt_triage
+        ALL_ANNOTATIONS="[]"
+
+        for JOB_ID in $FAILED_JOB_IDS; do
+          CHUNK=$(gh api \
+            "repos/${{ inputs.repo }}/check-runs/${JOB_ID}/annotations" \
+            --paginate 2>/dev/null || echo "[]")
+          ALL_ANNOTATIONS=$(python3 -c "
+        import sys, json
+        a = json.loads('$ALL_ANNOTATIONS') if '$ALL_ANNOTATIONS' != '[]' else []
+        try:
+            b = json.loads(sys.stdin.read())
+        except:
+            b = []
+        print(json.dumps(a + (b if isinstance(b, list) else [])))
+        " <<< "$CHUNK" 2>/dev/null || echo "$ALL_ANNOTATIONS")
+        done
+
+        echo "$ALL_ANNOTATIONS" > /tmp/bvt_triage/annotations.json
+        COUNT=$(python3 -c "
+        import json
+        d = json.load(open('/tmp/bvt_triage/annotations.json'))
+        print(len([x for x in d if x.get('annotation_level')=='failure']))
+        " 2>/dev/null || echo "0")
+        echo "failure_annotations=${COUNT}" >> $GITHUB_OUTPUT
+        echo "Found ${COUNT} failure-level annotations"
+
+    # ── 2. Download CI artifacts ─────────────────────────────────────────────
+    - name: Download CI artifacts
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        mkdir -p /tmp/bvt_triage/artifacts
+        for ARTIFACT_NAME in JUnitAndIntegrationTestReports KarateTestReports IS_BVT_Reports MSR_BVT_Reports; do
+          echo "Attempting: $ARTIFACT_NAME"
+          gh run download "${{ inputs.run-id }}" \
+            --repo "${{ inputs.repo }}" \
+            -n "$ARTIFACT_NAME" \
+            -D "/tmp/bvt_triage/artifacts/$ARTIFACT_NAME" 2>&1 \
+            && echo "  ✓ $ARTIFACT_NAME" \
+            || echo "  ⚠ $ARTIFACT_NAME not found"
+        done
+        echo "--- Artifact tree ---"
+        find /tmp/bvt_triage/artifacts -maxdepth 4 | head -30 || true
+
+    # ── 3. Get PR changed files ──────────────────────────────────────────────
+    - name: Fetch PR changed files
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        PR="${{ inputs.pr-number }}"
+        touch /tmp/bvt_triage/changed_files.txt
+        if [ -n "$PR" ] && [ "$PR" != "null" ] && [ "$PR" != "" ]; then
+          gh pr diff "$PR" \
+            --repo "${{ inputs.repo }}" \
+            --name-only > /tmp/bvt_triage/changed_files.txt 2>&1 \
+            && echo "Got changed files for PR #$PR" \
+            || echo "Could not get diff for PR #$PR"
+          cat /tmp/bvt_triage/changed_files.txt
+        fi
+
+    # ── 4. Run triage classifier ─────────────────────────────────────────────
+    - name: Run triage classifier
+      shell: bash
+      env:
+        RUN_ID:        ${{ inputs.run-id }}
+        WORKFLOW:      ${{ inputs.workflow }}
+        PR_NUMBER:     ${{ inputs.pr-number }}
+        REPO:          ${{ inputs.repo }}
+        ARTIFACT_DIR:  /tmp/bvt_triage/artifacts
+        ANNOTATIONS:   /tmp/bvt_triage/annotations.json
+        CHANGED_FILES: /tmp/bvt_triage/changed_files.txt
+      run: |
+        python3 "${{ github.action_path }}/triage.py" | tee /tmp/bvt_triage/report.md
+        echo ""
+        echo "--- Report preview ---"
+        head -40 /tmp/bvt_triage/report.md
+
+    # ── 5. Post as PR comment ────────────────────────────────────────────────
+    - name: Post triage comment on PR
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        PR="${{ inputs.pr-number }}"
+        if [ -z "$PR" ] || [ "$PR" = "null" ] || [ "$PR" = "" ]; then
+          echo "No PR number — report will be available as artifact only."
+          exit 0
+        fi
+
+        # Delete any previous triage comment (idempotent on re-runs)
+        PREV_IDS=$(gh api \
+          "repos/${{ inputs.repo }}/issues/${PR}/comments" \
+          --jq '[.[] | select(.body | startswith("<!-- bvt-triage -->")) | .id] | .[]' \
+          2>/dev/null || true)
+        for PREV_ID in $PREV_IDS; do
+          gh api --method DELETE \
+            "repos/${{ inputs.repo }}/issues/comments/${PREV_ID}" 2>/dev/null || true
+          echo "Deleted old triage comment $PREV_ID"
+        done
+
+        gh pr comment "$PR" \
+          --repo "${{ inputs.repo }}" \
+          --body-file /tmp/bvt_triage/report.md
+        echo "✓ Triage comment posted on PR #$PR"
+
+    # ── 6. Upload report as artifact (always available) ──────────────────────
+    - name: Upload triage report artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: bvt-triage-report
+        path: /tmp/bvt_triage/report.md
+        if-no-files-found: warn

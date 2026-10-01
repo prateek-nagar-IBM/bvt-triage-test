@@ -1,0 +1,58 @@
+name: BVT Triage Report
+
+on:
+  workflow_run:
+    workflows:
+      - "Action - Integration Server CI-CD"
+    types:
+      - completed
+
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Actions run ID of the failing CI run'
+        required: true
+      pr_number:
+        description: 'PR number that triggered that CI run'
+        required: false
+        default: ''
+
+jobs:
+  triage:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      actions: read
+      checks: read
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install beautifulsoup4 lxml requests
+
+      - name: Run BVT Triage
+        uses: ./.github/actions/bvt-triage
+        with:
+          run-id: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.run_id
+                || github.event.workflow_run.id }}
+          workflow: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && 'Action - Integration Server CI-CD'
+                || github.event.workflow_run.name }}
+          repo:     ${{ github.repository }}
+          token:    ${{ secrets.GITHUB_TOKEN }}
+          pr-number: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.pr_number
+                || github.event.workflow_run.pull_requests[0].number }}

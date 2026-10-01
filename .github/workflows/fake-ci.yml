@@ -1,0 +1,66 @@
+name: Action - Integration Server CI-CD
+# Fake CI workflow that mimics the real esb-ci-cd.yml structure.
+# It always fails and uploads a fake JUnit artifact — used to test the triage action.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: Unit and Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate fake JUnit XML failure report
+        run: |
+          mkdir -p staging/reports/tests/test/classes
+          cat > staging/reports/tests/test/classes/com.webmethods.is.server.JmsConnectionMetadataTest.html <<'EOF'
+          <html><body>
+          <h1>Test Results - com.webmethods.is.server.JmsConnectionMetadataTest</h1>
+          <div>1 failures</div>
+          <div class="test">
+            <span>testAliasNameDescriptor FAILED</span>
+            <pre>java.lang.AssertionError: expected: &lt;Alias Name&gt; but was: &lt;Connection Alias Name&gt;
+            at com.webmethods.is.server.JmsConnectionMetadataTest.testAliasNameDescriptor(JmsConnectionMetadataTest.java:55)</pre>
+          </div>
+          </body></html>
+          EOF
+
+          cat > staging/reports/tests/test/index.html <<'EOF'
+          <html><body>
+          <h1>Test Results</h1>
+          <table>
+            <tr><th>Class</th><th>Tests</th><th>Failures</th></tr>
+            <tr><td><a href="classes/com.webmethods.is.server.JmsConnectionMetadataTest.html">JmsConnectionMetadataTest</a></td><td>5</td><td>1</td></tr>
+          </table>
+          </body></html>
+          EOF
+
+      - name: Upload test reports artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JUnitAndIntegrationTestReports
+          path: staging/reports/tests
+
+      - name: Save PR number for triage
+        if: always()
+        run: |
+          echo "${{ github.event.pull_request.number }}" > /tmp/pr_number.txt
+
+      - name: Upload PR number artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-number
+          path: /tmp/pr_number.txt
+
+      # Always fail so the triage workflow fires
+      - name: Deliberately fail
+        run: |
+          echo "::error file=server/src/test/java/com/webmethods/is/server/JmsConnectionMetadataTest.java,line=55,title=JmsConnectionMetadataTest > testAliasNameDescriptor::expected: <Alias Name> but was: <Connection Alias Name>"
+          exit 1
