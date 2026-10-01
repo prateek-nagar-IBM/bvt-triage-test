@@ -65,23 +65,36 @@ def classify(title: str, message: str, path: str, changed_modules: set) -> tuple
         if re.search(pattern, combined, re.IGNORECASE):
             return label, False
 
-    # Gradle / JUnit: correlate with PR diff via module name
+    # AssertionError / test assertion failure — classic unit test regression
+    if re.search(r"AssertionError|expected:.*but was:", combined, re.IGNORECASE):
+        if path:
+            mod = extract_module(path)
+            if mod and mod in changed_modules:
+                return f"CODE CHANGE: assertion failure in `{mod}` (module in PR diff)", True
+        # Even without diff data, an assertion failure is a test regression
+        return "CODE CHANGE: unit test assertion failure", True
+
+    # NullPointerException — strong signal if module is in the diff
+    if re.search(r"NullPointerException", combined):
+        if path:
+            mod = extract_module(path)
+            if mod and mod in changed_modules:
+                return f"CODE CHANGE: NullPointerException in `{mod}` (module in PR diff)", True
+        if changed_modules:
+            return "CODE CHANGE (likely): NullPointerException — verify against PR diff", True
+        return "CODE CHANGE (possible): NullPointerException — no diff available", True
+
+    # Gradle / JUnit: correlate any other failure with PR diff via module name
     if path:
         mod = extract_module(path)
         if mod and mod in changed_modules:
-            return f"CODE CHANGE: regression in `{mod}` (module in PR diff)", True
+            return f"CODE CHANGE: test failure in `{mod}` (module in PR diff)", True
 
     # Venus: annotation title contains suite name — check module proximity
     if title:
         for mod in changed_modules:
             if mod.lower() in title.lower():
                 return f"CODE CHANGE: suite name matches changed module `{mod}`", True
-
-    # NullPointerException in any test is suspicious if the PR touched Java
-    if re.search(r"NullPointerException", combined):
-        if changed_modules:
-            return "CODE CHANGE (likely): NullPointerException — check PR diff", True
-        return "UNKNOWN: NullPointerException — no diff correlation", None
 
     return "UNKNOWN: needs manual review", None
 

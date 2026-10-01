@@ -59,8 +59,11 @@ jobs:
           name: pr-number
           path: /tmp/pr_number.txt
 
-      # Always fail so the triage workflow fires
-      - name: Deliberately fail
+      # Emit rich annotations THEN fail — GitHub captures ::error lines from the same step
+      - name: Deliberately fail with rich annotations
         run: |
-          echo "::error file=server/src/test/java/com/webmethods/is/server/JmsConnectionMetadataTest.java,line=55,title=JmsConnectionMetadataTest > testAliasNameDescriptor::expected: <Alias Name> but was: <Connection Alias Name>"
+          # Annotation format: ::error file=<path>,line=<n>,title=<title>::<message>
+          # Both title AND message are populated so triage.py can classify them.
+          echo "::error file=server/src/test/java/com/webmethods/is/server/JmsConnectionMetadataTest.java,line=55,title=JmsConnectionMetadataTest > testAliasNameDescriptor::java.lang.AssertionError: expected: <Alias Name> but was: <Connection Alias Name>"
+          echo "::error file=server/src/test/java/com/webmethods/is/integrationlive/CloudHybridInvokeDelegateImplTest.java,line=122,title=CloudHybridInvokeDelegateImplTest > testResolveRuntime::java.lang.NullPointerException: Cannot invoke getRuntime() because delegate is null"
           exit 1
